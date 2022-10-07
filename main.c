@@ -4,7 +4,7 @@
 #include "array.h"
 #include <setjmp.h>
 
-#define PROCESS_WAIT_INTERVAL 0
+#define PROCESS_WAIT_INTERVAL 1000
 
 
 int g_long_jumpable = 0;
