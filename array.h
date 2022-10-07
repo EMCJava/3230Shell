@@ -42,7 +42,7 @@ int CountNull(struct Array array) {
 
 void FreeArray(struct Array *array) {
     free(array->data);
-    array->data = NULL;
+    *array = NewArray();
 }
 
 int Len(struct Array array) {
