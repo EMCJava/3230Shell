@@ -30,6 +30,9 @@ struct Shell {
     char *current_command;
     int command_stats_required;
 
+    // struct ProcessStats
+    struct Array current_child_process_stats;
+
     int running;
 };
 
@@ -119,19 +122,23 @@ struct Array splitCommand(const char *command) {
 }
 
 // return data read
-int PipeReadWrite(int in, int out) {
+ssize_t PipeReadWrite(int in, int out) {
 
     char buffer[512];
-    int nbytes = read(in, buffer, sizeof(buffer));
-    if (nbytes > 0) write(out, buffer, nbytes);
+    ssize_t date_read = read(in, buffer, sizeof(buffer));
+    if (date_read > 0) write(out, buffer, date_read);
 
-    return nbytes;
+    return date_read;
 }
 
-void runExec(const struct Array words, int show_stats) {
+void runExec(struct Shell *shell, const struct Array words) {
 
     int childCount = CountNull(words);
-    struct Array childStats = NewArray();
+
+    // new child process storage
+    FreeArrayElements(&shell->current_child_process_stats);
+    FreeArray(&shell->current_child_process_stats);
+    shell->current_child_process_stats = NewArray();
 
     pid_t last_child;
     int pipefd_arr[(childCount + 1) * 2]; // room for the first pipe
@@ -150,8 +157,8 @@ void runExec(const struct Array words, int show_stats) {
             // child process
 
             // clean parent stats
-            FreeArrayElements(&childStats);
-            FreeArray(&childStats);
+            FreeArrayElements(&shell->current_child_process_stats);
+            FreeArray(&shell->current_child_process_stats);
 
             // redirect previous stdout to this input
             dup2(pipefd[(i - 1) * 2], 0);
@@ -160,14 +167,14 @@ void runExec(const struct Array words, int show_stats) {
             // close all pipe
             for (int j = 0; j < childCount * 2; ++j) close(pipefd[j]);
 
-            int exit_value = execvp(words.data[commandPipeIndex], (char **) words.data + commandPipeIndex);
+            execvp(words.data[commandPipeIndex], (char **) words.data + commandPipeIndex);
             exit(errno);
         }
 
         // ready to record the stats
         struct ProcessStats *finished_process = malloc(sizeof(struct ProcessStats));
         finished_process->pid = last_child;
-        PushBack(&childStats, finished_process);
+        PushBack(&shell->current_child_process_stats, finished_process);
 
         // advance to next pipe
         while (words.data[commandPipeIndex++]);
@@ -178,6 +185,7 @@ void runExec(const struct Array words, int show_stats) {
 
     // redirect stdout
     int stdin_cpy = dup(0);
+    int stdout_cpy = dup(1);
     // last process's read pipe
     dup2(pipefd[childCount * 2 - 2], 0);
 
@@ -194,7 +202,8 @@ void runExec(const struct Array words, int show_stats) {
 
         // save child stats
         if (last_process.pid > 0) {
-            struct ProcessStats **child_at_array = Find(childStats, IsPidEqual, last_process.pid);
+            struct ProcessStats **child_at_array = Find(shell->current_child_process_stats, IsPidEqual,
+                                                        last_process.pid);
             assert(child_at_array != NULL);
             **child_at_array = last_process;
         }
@@ -206,13 +215,14 @@ void runExec(const struct Array words, int show_stats) {
     // clean up child process
     // while (wait(NULL) >= 0);
 
-    // restore stdin
+    // restore stdin/out
     dup2(stdin_cpy, 0);
+    dup2(stdout_cpy, 1);
 
     // exit code
-    for (int i = 0; i < Len(childStats); ++i)
-        if (((struct ProcessStats *) *At(childStats, i))->pid == last_child)
-            last_process = *(struct ProcessStats *) *At(childStats, i);
+    for (int i = 0; i < Len(shell->current_child_process_stats); ++i)
+        if (((struct ProcessStats *) *At(shell->current_child_process_stats, i))->pid == last_child)
+            last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats, i);
     int exit_code = WEXITSTATUS(last_process.status);
     if (exit_code != 0) {
         switch (exit_code) {
@@ -234,7 +244,7 @@ void runExec(const struct Array words, int show_stats) {
         printf("terminated by signal: %d\n", WTERMSIG(last_process.status));
 
     // stats
-    if (show_stats) {
+    if (shell->command_stats_required) {
         commandPipeIndex = 0;
         for (int i = 0; i < childCount; ++i) {
 
@@ -243,7 +253,7 @@ void runExec(const struct Array words, int show_stats) {
             if (exe_name) ++exe_name;
             else exe_name = words.data[commandPipeIndex];
 
-            last_process = *(struct ProcessStats *) *At(childStats, i);
+            last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats, i);
 
             printf("(PID)%d  (CMD)%s    (user)%.3f s  (sys)%.3f s\n", last_process.pid, exe_name,
                    last_process.rusageStats.ru_utime.tv_sec + last_process.rusageStats.ru_utime.tv_usec / 1000000.0,
@@ -255,8 +265,8 @@ void runExec(const struct Array words, int show_stats) {
     }
 
     // clean child stats
-    FreeArrayElements(&childStats);
-    FreeArray(&childStats);
+    FreeArrayElements(&shell->current_child_process_stats);
+    FreeArray(&shell->current_child_process_stats);
 }
 
 void interpCommand(struct Shell *shell) {
@@ -302,7 +312,7 @@ void interpCommand(struct Shell *shell) {
         }
 
         // user program
-        runExec(decorated_words, shell->command_stats_required);
+        runExec(shell, decorated_words);
 
         FreeArrayElements(&words);
         FreeArray(&words);
