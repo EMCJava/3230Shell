@@ -61,6 +61,6 @@ int main(int argc, char *argv[]) {
     }
 
     freeShell(&shell);
-    printf("3230shell: Terminated");
+    printf("3230shell: Terminated\n");
     return 0;
 }
