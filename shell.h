@@ -141,17 +141,22 @@ void runExec(struct Shell *shell, const struct Array words) {
     shell->current_child_process_stats = NewArray();
 
     pid_t last_child;
-    int pipefd_arr[(childCount + 1) * 2]; // room for the first pipe
-    pipefd_arr[0] = 0; // first read from the stdin
-    pipefd_arr[1] = 1; // noe used
-
-    // offset for the additional space
-    int *pipefd = pipefd_arr + 2;
-
+    int current_pipe_in = -1;
     int commandPipeIndex = 0;
-    // setup all pipe
+
+    int stdin_cpy = dup(0);
+    int stdout_cpy = dup(1);
     for (int i = 0; i < childCount; ++i) {
-        pipe(pipefd + i * 2);
+
+        int previous_pipe_in = current_pipe_in;
+        int pipefd[2] = {current_pipe_in, -1};
+
+        if (i != childCount - 1) {
+            pipe(pipefd);
+            current_pipe_in = pipefd[0];
+        } else {
+            pipefd[0] = pipefd[1] = -1;
+        }
 
         if (!(last_child = fork())) {
             // child process
@@ -161,15 +166,23 @@ void runExec(struct Shell *shell, const struct Array words) {
             FreeArray(&shell->current_child_process_stats);
 
             // redirect previous stdout to this input
-            dup2(pipefd[(i - 1) * 2], 0);
+            if (previous_pipe_in != -1) {
+                dup2(previous_pipe_in, 0);
+                close(previous_pipe_in);
+            }
+
             // redirect stdout to next input
-            dup2(pipefd[i * 2 + 1], 1);
-            // close all pipe
-            for (int j = 0; j < childCount * 2; ++j) close(pipefd[j]);
+            if (pipefd[1] != -1) {
+                dup2(pipefd[1], 1);
+                close(pipefd[1]);
+            }
 
             execvp(words.data[commandPipeIndex], (char **) words.data + commandPipeIndex);
             exit(errno);
         }
+
+        if (previous_pipe_in != -1) close(previous_pipe_in);
+        if (pipefd[1] != -1) close(pipefd[1]);
 
         // ready to record the stats
         struct ProcessStats *finished_process = malloc(sizeof(struct ProcessStats));
@@ -182,23 +195,11 @@ void runExec(struct Shell *shell, const struct Array words) {
         // parent process keep creating
     }
 
-
-    // redirect stdout
-    int stdin_cpy = dup(0);
-    int stdout_cpy = dup(1);
-    // last process's read pipe
-    dup2(pipefd[childCount * 2 - 2], 0);
-
-    // close all pipe
-    for (int i = 0; i < childCount * 2; ++i) close(pipefd[i]);
-
     struct ProcessStats last_process;
     while ((last_process.pid = wait3(&last_process.status, WNOHANG, &last_process.rusageStats)) >= 0) {
 #if PROCESS_WAIT_INTERVAL != 0
         usleep(PROCESS_WAIT_INTERVAL);
 #endif
-        // blocking, but will stop at EOF (the end if child)
-        PipeReadWrite(0, 1);
 
         // save child stats
         if (last_process.pid > 0) {
@@ -208,12 +209,6 @@ void runExec(struct Shell *shell, const struct Array words) {
             **child_at_array = last_process;
         }
     }
-
-    // flush input
-    while (PipeReadWrite(0, 1) > 0);
-
-    // clean up child process
-    // while (wait(NULL) >= 0);
 
     // restore stdin/out
     dup2(stdin_cpy, 0);
