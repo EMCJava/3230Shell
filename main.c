@@ -6,14 +6,24 @@
 
 #define PROCESS_WAIT_INTERVAL 0
 
+
 int g_long_jumpable = 0;
 sigjmp_buf g_ctrlc_buf;
 
+struct Shell g_shell;
+
 void sigint_handler(int signum) {
     if (signum == SIGINT) {
+
+        // reading input
         if (g_long_jumpable) {
             printf("\n");
             siglongjmp(g_ctrlc_buf, 1);
+        } else {
+//            printf("killing child\n");
+//            for (int i = 0; i < Len(g_shell.current_child_process_stats); ++i) {
+//                kill(((struct ProcessStats *) *At(g_shell.current_child_process_stats, i))->pid, SIGINT);
+//            }
         }
     }
 }
@@ -40,14 +50,15 @@ struct Shell initShell() {
     shell.current_command = NULL;
     shell.command_stats_required = 0;
     shell.running = 1;
+    shell.current_child_process_stats = NewArray();
 
     return shell;
 }
 
 int main(int argc, char *argv[]) {
-    struct Shell shell = initShell();
-    struct Shell *shell_ptr = &shell;
-    while (shell.running) {
+    g_shell = initShell();
+    struct Shell *shell_ptr = &g_shell;
+    while (g_shell.running) {
 
         // setting a jump point to exit blocking readline function
         while (sigsetjmp(g_ctrlc_buf, 1) != 0);
@@ -60,7 +71,7 @@ int main(int argc, char *argv[]) {
         interpCommand(shell_ptr);
     }
 
-    freeShell(&shell);
+    freeShell(&g_shell);
     printf("3230shell: Terminated\n");
     return 0;
 }
