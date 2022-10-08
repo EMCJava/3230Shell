@@ -16,22 +16,47 @@
 
 #include "array.h"
 
+#define PROCESS_WAIT_INTERVAL 1000
+
 struct ProcessStats {
     pid_t pid;
+    char *name;
     int status;
     struct rusage rusageStats;
 };
+
+void FreeProcessStats(void *p_sta) {
+    free(((struct ProcessStats *) p_sta)->name);
+    free(p_sta);
+}
 
 int IsPidEqual(void *p_sta, void *pid) {
     return ((struct ProcessStats *) p_sta)->pid == (int) pid;
 }
 
+int IsStatusNotEmpty(void *p_sta, void *pid) {
+    return ((struct ProcessStats *) p_sta)->status != -1;
+}
+
+extern int g_sig1;
+
+void user_sig1_handler(int signum) {
+    if (signum == SIGUSR1) g_sig1 = 1;
+}
+
 struct Shell {
     char *current_command;
+    struct Array current_command_list;
+
     int command_stats_required;
+    int command_background_required;
 
     // struct ProcessStats
     struct Array current_child_process_stats;
+
+    // struct ProcessStats
+    struct Array background_last_pipe_process_stats;
+    int background_last_pipe_process_stats_modifiable;
 
     int running;
 };
@@ -45,16 +70,28 @@ void freeShell(struct Shell *shell) {
 }
 
 // pipe split by null
-struct Array splitCommand(const char *command) {
+void splitCommand(struct Shell *shell) {
     struct Array words = NewArray();
     int is_previous_separator = 1;
-    for (const char *ch = command; *ch != 0; ++ch) {
+    shell->command_background_required = 0;
+    for (const char *ch = shell->current_command; *ch; ++ch) {
         if (*ch == ' ') is_previous_separator = 1;
         else if (*ch == '|') {
             is_previous_separator = 1;
 
             //split pipe
             PushBack(&words, NULL);
+        } else if (*ch == '&') {
+            shell->command_background_required = 1;
+            while (*++ch) {
+                if (*ch != ' ') {
+                    FreeArray(&words);
+
+                    printf("3230shell: '&' should not appear in the middle of the command line\n");
+                    shell->current_command_list = NewArray();
+                    return;
+                }
+            }
         } else if (is_previous_separator) {
             is_previous_separator = 0;
 
@@ -62,7 +99,7 @@ struct Array splitCommand(const char *command) {
             PushBack(&words, 1);
         } else {
             // inside a parm
-            ++(*At(words, Len(words) - 1));
+            ++(*AtLenRel(words, -1));
         }
     }
 
@@ -70,14 +107,15 @@ struct Array splitCommand(const char *command) {
     PushBack(&words, NULL); // mark end
     is_previous_separator = 1;
     int index = 0;
-    for (const char *ch = command; *ch != 0; ++ch) {
+    for (const char *ch = shell->current_command; *ch != 0; ++ch) {
         if (*ch == ' ') is_previous_separator = 1;
         else if (*ch == '|') {
             if (index == 0) {
                 FreeArray(&words);
 
                 printf("3230shell: should not have | before all command\n");
-                return NewArray();
+                shell->current_command_list = NewArray();
+                return;
             } else if (*At(words, index - 1) == NULL) {
                 // double pipe
 
@@ -88,12 +126,14 @@ struct Array splitCommand(const char *command) {
                 FreeArray(&words);
 
                 printf("3230shell: should not have two consecutive | without in-between command\n");
-                return NewArray();
+                shell->current_command_list = NewArray();
+                return;
             }
 
             is_previous_separator = 1;
             ++index;
-        } else if (is_previous_separator) {
+        } else if (*ch == '&') { break; }
+        else if (is_previous_separator) {
             is_previous_separator = 0;
 
             int word_length = *At(words, index);
@@ -115,27 +155,147 @@ struct Array splitCommand(const char *command) {
         FreeArray(&words);
 
         printf("3230shell: should not have | after all command\n");
-        return NewArray();
+        shell->current_command_list = NewArray();
+        return;
     }
 
-    return words;
+    shell->current_command_list = words;
+}
+
+const char *GetProgramName(const char *path) {
+    const char *exe_name = strrchr(path, '/');
+    if (exe_name) ++exe_name;
+    else exe_name = path;
+
+    return exe_name;
+}
+
+/* -1 for leave it, -2 for close */
+void runProgram(int in, int out, char **argv) {
+
+    // redirect previous stdout to this input
+    if (in == -2) {
+        int nullFd[2];
+        pipe(nullFd);
+        dup2(nullFd[0], 0);
+        close(nullFd[0]);
+        close(nullFd[1]);
+    } else if (in != -1) {
+        dup2(in, 0);
+        close(in);
+    }
+
+    // redirect stdout to next input
+    if (out == -2) {
+        int nullFd[2];
+        pipe(nullFd);
+        dup2(nullFd[1], 1);
+        close(nullFd[0]);
+        close(nullFd[1]);
+    } else if (out != -1) {
+        dup2(out, 1);
+        close(out);
+    }
+
+    // wait for SIGUSR1
+    while (!g_sig1) pause();
+
+    execvp(*argv, argv);
+    exit(errno);
+}
+
+void LogExitCode(int exit_code, char *process_name) {
+    if (exit_code != 0) {
+        switch (exit_code) {
+            case 1: // simply program return 1
+                break;
+            case 2:
+                printf("3230shell: '%s': No such file or directory\n", process_name);
+                break;
+            case 13:
+                printf("3230shell: '%s': Permission denied\n", process_name);
+                break;
+            default:
+                printf("3230shell: Unknown error code (%d)\n", exit_code);
+        }
+    }
+}
+
+void LogSignalled(int status) {
+    if (!WIFEXITED(status)) {
+        switch (WTERMSIG(status)) {
+            case 1: // simply program return 1
+                break;
+            case SIGINT:
+                printf("Interrupt\n");
+                break;
+            case SIGKILL:
+                printf("Killed\n");
+                break;
+            case SIGTERM:
+                printf("Terminated\n");
+                break;
+            default:
+                printf("Unknown SIG code (%d)\n", WTERMSIG(status));
+        }
+    }
+}
+
+void FrontGroundJobTerminate(struct Shell *shell) {
+
+    struct ProcessStats last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats,
+                                                                    Len(shell->current_child_process_stats) - 1);
+
+    // exit code
+    LogExitCode(WEXITSTATUS(last_process.status), last_process.name);
+
+    // signalled
+    LogSignalled(last_process.status);
+
+    // stats
+    if (shell->command_stats_required) {
+        int commandPipeIndex = 0;
+        for (int i = 0; i < Len(shell->current_child_process_stats); ++i) {
+
+            last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats, i);
+
+            printf("(PID)%d  (CMD)%s    (user)%.3f s  (sys)%.3f s\n", last_process.pid, last_process.name,
+                   last_process.rusageStats.ru_utime.tv_sec + last_process.rusageStats.ru_utime.tv_usec / 1000000.0,
+                   last_process.rusageStats.ru_stime.tv_sec + last_process.rusageStats.ru_stime.tv_usec / 1000000.0);
+        }
+    }
+
+    // clean child stats
+    FreeCustomArrayElements(&shell->current_child_process_stats, FreeProcessStats);
+    FreeArray(&shell->current_child_process_stats);
+}
+
+void StartChildProcess(struct Array chain) {
+    for (int i = 0; i < Len(chain); ++i)
+        kill(((struct ProcessStats *) *At(chain, i))->pid, SIGUSR1);
 }
 
 void runExec(struct Shell *shell, const struct Array words) {
 
+    struct Array current_process_chain = NewArray();
     int childCount = CountNull(words);
 
     // new child process storage
-    FreeArrayElements(&shell->current_child_process_stats);
-    FreeArray(&shell->current_child_process_stats);
-    shell->current_child_process_stats = NewArray();
+    assert(Len(shell->current_child_process_stats) == 0);
+    current_process_chain = NewArray();
 
     pid_t last_child;
-    int current_pipe_in = -1;
+
+    // background child should not read
+    int current_pipe_in = shell->command_background_required ? -2 : -1;
     int commandPipeIndex = 0;
 
     int stdin_cpy = dup(0);
     int stdout_cpy = dup(1);
+
+    // all child should wait for this signal
+    signal(SIGUSR1, user_sig1_handler);
+
     for (int i = 0; i < childCount; ++i) {
 
         int previous_pipe_in = current_pipe_in;
@@ -152,153 +312,95 @@ void runExec(struct Shell *shell, const struct Array words) {
             // child process
 
             // clean parent stats
-            FreeArrayElements(&shell->current_child_process_stats);
-            FreeArray(&shell->current_child_process_stats);
+            FreeCustomArrayElements(&current_process_chain, FreeProcessStats);
+            FreeArray(&current_process_chain);
 
-            // redirect previous stdout to this input
-            if (previous_pipe_in != -1) {
-                dup2(previous_pipe_in, 0);
-                close(previous_pipe_in);
-            }
-
-            // redirect stdout to next input
-            if (pipefd[1] != -1) {
-                dup2(pipefd[1], 1);
-                close(pipefd[1]);
-            }
-
-            execvp(words.data[commandPipeIndex], (char **) words.data + commandPipeIndex);
-            exit(errno);
+            runProgram(previous_pipe_in, pipefd[1], (char **) words.data + commandPipeIndex);
         }
 
+        // close child's reading/writing pipe
         if (previous_pipe_in != -1) close(previous_pipe_in);
         if (pipefd[1] != -1) close(pipefd[1]);
 
         // ready to record the stats
         struct ProcessStats *finished_process = malloc(sizeof(struct ProcessStats));
         finished_process->pid = last_child;
-        PushBack(&shell->current_child_process_stats, finished_process);
+        finished_process->status = -1;
+
+        // copy program name
+        const char *exe_name = GetProgramName(words.data[commandPipeIndex]);
+        finished_process->name = malloc(sizeof(char) * (strlen(exe_name) + 1));
+        strcpy(finished_process->name, exe_name);
+
+        PushBack(&current_process_chain, finished_process);
 
         // advance to next pipe
         while (words.data[commandPipeIndex++]);
 
         // parent process keep creating
     }
+    signal(SIGUSR1, SIG_DFL);
 
-    struct ProcessStats last_process;
-    while ((last_process.pid = wait3(&last_process.status, WNOHANG, &last_process.rusageStats)) >= 0) {
-#if PROCESS_WAIT_INTERVAL != 0
-        usleep(PROCESS_WAIT_INTERVAL);
-#endif
+    if (!shell->command_background_required) {
 
-        // save child stats
-        if (last_process.pid > 0) {
-            struct ProcessStats **child_at_array = Find(shell->current_child_process_stats, IsPidEqual,
-                                                        last_process.pid);
-            assert(child_at_array != NULL);
-            **child_at_array = last_process;
-        }
+        StartChildProcess(shell->current_child_process_stats = current_process_chain);
+
+        // wait for all frontend job finish
+        do {
+            pause();
+        } while (Len(shell->current_child_process_stats));
+    } else {
+
+        shell->background_last_pipe_process_stats_modifiable = 0;
+        PushBack(&shell->background_last_pipe_process_stats, *AtLenRel(current_process_chain, -1));
+        shell->background_last_pipe_process_stats_modifiable = 1;
+
+        StartChildProcess(current_process_chain);
+
+        // save only the last process, free other
+        --current_process_chain.len;
+        FreeCustomArrayElements(&current_process_chain, FreeProcessStats);
+        FreeArray(&current_process_chain);
     }
 
     // restore stdin/out
     dup2(stdin_cpy, 0);
     dup2(stdout_cpy, 1);
-
-    // exit code
-    for (int i = 0; i < Len(shell->current_child_process_stats); ++i)
-        if (((struct ProcessStats *) *At(shell->current_child_process_stats, i))->pid == last_child)
-            last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats, i);
-    int exit_code = WEXITSTATUS(last_process.status);
-    if (exit_code != 0) {
-        switch (exit_code) {
-            case 1: // simply program return 1
-                break;
-            case 2:
-                printf("3230shell: '%s': No such file or directory\n", (char *) *At(words, 0));
-                break;
-            case 13:
-                printf("3230shell: '%s': Permission denied\n", (char *) *At(words, 0));
-                break;
-            default:
-                printf("3230shell: Unknown error code (%d)\n", exit_code);
-        }
-    }
-
-    // signalled
-    if (!WIFEXITED(last_process.status)) {
-        switch (WTERMSIG(last_process.status)) {
-            case 1: // simply program return 1
-                break;
-            case SIGINT:
-                printf("Interrupt\n");
-                break;
-            case SIGKILL:
-                printf("Killed\n");
-                break;
-            default:
-                printf("3230shell: Unknown error code (%d)\n", WTERMSIG(last_process.status));
-        }
-
-    }
-
-    // stats
-    if (shell->command_stats_required) {
-        commandPipeIndex = 0;
-        for (int i = 0; i < childCount; ++i) {
-
-            // int exit_value = execvp(words.data[commandPipeIndex], (char **) words.data + commandPipeIndex);
-            const char *exe_name = strrchr(words.data[commandPipeIndex], '/');
-            if (exe_name) ++exe_name;
-            else exe_name = words.data[commandPipeIndex];
-
-            last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats, i);
-
-            printf("(PID)%d  (CMD)%s    (user)%.3f s  (sys)%.3f s\n", last_process.pid, exe_name,
-                   last_process.rusageStats.ru_utime.tv_sec + last_process.rusageStats.ru_utime.tv_usec / 1000000.0,
-                   last_process.rusageStats.ru_stime.tv_sec + last_process.rusageStats.ru_stime.tv_usec / 1000000.0);
-
-            // advance to next command
-            while (words.data[commandPipeIndex++]);
-        }
-    }
-
-    // clean child stats
-    FreeArrayElements(&shell->current_child_process_stats);
-    FreeArray(&shell->current_child_process_stats);
 }
 
 void interpCommand(struct Shell *shell) {
     if (shell->current_command != NULL) {
 
         shell->command_stats_required = 0;
-        struct Array words = splitCommand(shell->current_command);
-        struct Array decorated_words = words;
+        splitCommand(shell);
+        struct Array decorated_words = shell->current_command_list;
 
         // empty command
-        if (Len(words) == 0 || *At(words, 0) == NULL) {
-            FreeArrayElements(&words);
-            FreeArray(&words);
+        if (Len(shell->current_command_list) == 0 ||
+            *At(shell->current_command_list, 0) == NULL) {
+            FreeArrayElements(&shell->current_command_list);
+            FreeArray(&shell->current_command_list);
             return;
         }
 
         // default command
 
         // exit command
-        if (Len(words) == 2 && strcmp((char *) *At(words, 0), "exit") == 0) {
+        if (Len(shell->current_command_list) == 2 &&
+            strcmp((char *) *At(shell->current_command_list, 0), "exit") == 0) {
             shell->running = 0;
             return;
         }
 
         // timeX command
-        if (strcmp((char *) *At(words, 0), "timeX") == 0) {
+        if (strcmp((char *) *At(shell->current_command_list, 0), "timeX") == 0) {
 
-            if (Len(words) == 2) {
+            if (Len(shell->current_command_list) == 2) {
                 printf("3230shell: \"timeX\" cannot be a standalone command\n");
                 return;
             }
 
-            if (Len(words) > 2 &&
-                strcmp((char *) *At(words, Len(words) - 2), "&") == 0) {
+            if (shell->command_background_required) {
                 printf("3230shell: \"timeX\" cannot be run in background mode\n");
                 return;
             }
@@ -312,8 +414,8 @@ void interpCommand(struct Shell *shell) {
         // user program
         runExec(shell, decorated_words);
 
-        FreeArrayElements(&words);
-        FreeArray(&words);
+        FreeArrayElements(&shell->current_command_list);
+        FreeArray(&shell->current_command_list);
     }
 }
 
