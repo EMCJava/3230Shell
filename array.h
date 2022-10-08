@@ -21,6 +21,15 @@ struct Array NewArray() {
     return result;
 }
 
+void FreeCustomArrayElements(struct Array *array, void(*deallocator)(void *)) {
+    for (int i = 0; i < array->len; ++i) {
+        deallocator(array->data[i]);
+        array->data[i] = NULL;
+    }
+
+    array->len = 0;
+}
+
 void FreeArrayElements(struct Array *array) {
     for (int i = 0; i < array->len; ++i) {
         free(array->data[i]);
@@ -51,6 +60,34 @@ int Len(struct Array array) {
 
 void **At(struct Array array, int index) {
     return &array.data[index];
+}
+
+void **AtLenRel(struct Array array, int len_rel) {
+    return &array.data[array.len + len_rel];
+}
+
+int All(struct Array array, int(*pred)(void *, void *), void *context) {
+    int true = 1;
+    for (int i = 0; i < array.len && true; ++i)
+        true &= pred(array.data[i], context);
+    return true;
+}
+
+void RemoveAt(struct Array *array, int index) {
+    for (int j = index; j < array->len - 1; ++j) array->data[j] = array->data[j + 1];
+    --array->len;
+}
+
+/* Return removed index */
+int Remove(struct Array *array, void *data) {
+    for (int i = 0; i < array->len; ++i) {
+        if (array->data[i] == data) {
+            RemoveAt(array, i);
+            return i;
+        }
+    }
+
+    return -1;
 }
 
 void **Find(struct Array array, int(*pred)(void *, void *), void *context) {
