@@ -121,16 +121,6 @@ struct Array splitCommand(const char *command) {
     return words;
 }
 
-// return data read
-ssize_t PipeReadWrite(int in, int out) {
-
-    char buffer[512];
-    ssize_t date_read = read(in, buffer, sizeof(buffer));
-    if (date_read > 0) write(out, buffer, date_read);
-
-    return date_read;
-}
-
 void runExec(struct Shell *shell, const struct Array words) {
 
     int childCount = CountNull(words);
@@ -235,8 +225,21 @@ void runExec(struct Shell *shell, const struct Array words) {
     }
 
     // signalled
-    if (!WIFEXITED(last_process.status))
-        printf("terminated by signal: %d\n", WTERMSIG(last_process.status));
+    if (!WIFEXITED(last_process.status)) {
+        switch (WTERMSIG(last_process.status)) {
+            case 1: // simply program return 1
+                break;
+            case SIGINT:
+                printf("Interrupt\n");
+                break;
+            case SIGKILL:
+                printf("Killed\n");
+                break;
+            default:
+                printf("3230shell: Unknown error code (%d)\n", WTERMSIG(last_process.status));
+        }
+
+    }
 
     // stats
     if (shell->command_stats_required) {
