@@ -2,31 +2,13 @@
 #include <string.h>
 #include "shell.h"
 #include "array.h"
-#include <setjmp.h>
 
-#define PROCESS_WAIT_INTERVAL 1000
+#include "shell_signal.h"
 
-
-int g_long_jumpable = 0;
-sigjmp_buf g_ctrlc_buf;
+sigjmp_buf g_readline_ctrlc_buf;
 
 struct Shell g_shell;
-
-void sigint_handler(int signum) {
-    if (signum == SIGINT) {
-
-        // reading input
-        if (g_long_jumpable) {
-            printf("\n");
-            siglongjmp(g_ctrlc_buf, 1);
-        } else {
-//            printf("killing child\n");
-//            for (int i = 0; i < Len(g_shell.current_child_process_stats); ++i) {
-//                kill(((struct ProcessStats *) *At(g_shell.current_child_process_stats, i))->pid, SIGINT);
-//            }
-        }
-    }
-}
+int g_sig1 = 0;
 
 // handle input
 void acceptCommand(struct Shell *shell) {
@@ -46,11 +28,12 @@ void acceptCommand(struct Shell *shell) {
 struct Shell initShell() {
     struct Shell shell;
 
-    signal(SIGINT, sigint_handler);
     shell.current_command = NULL;
     shell.command_stats_required = 0;
     shell.running = 1;
     shell.current_child_process_stats = NewArray();
+
+    signal(SIGCLD, shell_child_signal_handler);
 
     return shell;
 }
@@ -61,12 +44,11 @@ int main(int argc, char *argv[]) {
     while (g_shell.running) {
 
         // setting a jump point to exit blocking readline function
-        while (sigsetjmp(g_ctrlc_buf, 1) != 0);
-
-        g_long_jumpable = 1;
+        signal(SIGINT, shell_input_signal_handler);
+        while (sigsetjmp(g_readline_ctrlc_buf, 1) != 0);
         printf("$$ 3230shell ##   ");
         acceptCommand(shell_ptr);
-        g_long_jumpable = 0;
+        signal(SIGINT, SIG_IGN);
 
         interpCommand(shell_ptr);
     }
