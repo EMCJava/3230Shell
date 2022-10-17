@@ -458,10 +458,21 @@ void interpCommand(struct Shell *shell) {
         // default command
 
         // exit command
-        if (Len(shell->current_command_list) == 2 &&
-            strcmp((char *) *At(shell->current_command_list, 0), "exit") == 0) {
-            shell->running = 0;
-            return;
+        if (strcmp((char*)*At(shell->current_command_list, 0), "exit") == 0) {
+
+            if(shell->command_background_required){
+                printf("3230shell: \"exit\" cannot be run in background mode\n");
+                return;
+            }
+
+            if (Len(shell->current_command_list) == 2) {
+                shell->running = 0;
+                return;
+            }
+            else {
+                printf("3230shell: \"exit\" with other arguments!!!\n");
+                return;
+            }
         }
 
         // timeX command
