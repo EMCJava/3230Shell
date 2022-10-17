@@ -234,6 +234,8 @@ void runProgram(int in, int out, char **argv) {
     // wait for SIGUSR1
     while (!g_sig1) pause();
 
+    signal(SIGINT, SIG_DFL);
+
     execvp(*argv, argv);
     exit(errno);
 }
