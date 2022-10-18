@@ -42,15 +42,25 @@ void shell_child_signal_handler(int signum) {
             } else {
                 // should be background job
 
-                struct ProcessStats **background_last_pipe_process = Find(
-                        g_shell.background_last_pipe_process_stats, IsPidEqual, finished_process.pid);
+                struct Array **finished_child_chain = Find(
+                        g_shell.background_last_pipe_process_stats, IsArrayLastPidEqual, finished_process.pid);
 
                 // found it!
-                if (background_last_pipe_process != NULL) {
+                if (finished_child_chain != NULL) {
+
+                    struct ProcessStats **background_last_pipe_process = AtLenRel(**finished_child_chain, -1);
                     (**background_last_pipe_process).status = finished_process.status;
                     (**background_last_pipe_process).rusageStats = finished_process.rusageStats;
 
                     LogExitCode(WEXITSTATUS(finished_process.status), (**background_last_pipe_process).name);
+
+                    int pds[2];
+                    pipe(pds);
+                    int sob = dup(1);
+                    dup2(pds[1], 1);
+
+                    char *string = malloc(sizeof(char) * 256);
+                    memset(string, 0, sizeof(char) * 256);
 
                     printf("[%d] %s ", (**background_last_pipe_process).pid,
                            (**background_last_pipe_process).name);
@@ -61,21 +71,21 @@ void shell_child_signal_handler(int signum) {
                     } else {
                         printf("Done\n");
                     }
-                }
 
-                // clear bg record
-                if (g_shell.background_last_pipe_process_stats_modifiable) {
+                    read(pds[0], string, 256);
+                    string[255] = 0;
 
-                    // check for all, may be didn't clean up precious round
-                    for (int i = 0; i < Len(g_shell.background_last_pipe_process_stats); ++i) {
-                        void *process_i = *At(g_shell.background_last_pipe_process_stats, i);
-                        if (IsStatusNotEmpty(process_i, NULL)) {
-                            RemoveAt(&g_shell.background_last_pipe_process_stats, i);
-                            FreeProcessStats(process_i);
+                    dup2(sob, 1);
+                    PushBack(&g_shell.logger, string);
 
-                            --i;
-                        }
-                    }
+                    // }
+
+                    // clear bg record
+
+                    ApplyToArrayElements(*finished_child_chain, TermProcess);
+                    FreeCustomArrayElements(*finished_child_chain, FreeProcessStats);
+                    Remove(&g_shell.background_last_pipe_process_stats, *finished_child_chain);
+                    FreeArray(*finished_child_chain);
                 }
             }
         }

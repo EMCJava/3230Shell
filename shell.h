@@ -13,6 +13,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 
 #include "array.h"
 
@@ -25,6 +26,10 @@ struct ProcessStats {
     struct rusage rusageStats;
 };
 
+void TermProcess(void *p_sta) {
+    kill(((struct ProcessStats *) p_sta)->pid, SIGKILL);
+}
+
 void FreeProcessStats(void *p_sta) {
     free(((struct ProcessStats *) p_sta)->name);
     free(p_sta);
@@ -33,6 +38,11 @@ void FreeProcessStats(void *p_sta) {
 int IsPidEqual(void *p_sta, void *pid) {
     return ((struct ProcessStats *) p_sta)->pid == (int) pid;
 }
+
+int IsArrayLastPidEqual(void *p_sta, void *pid) {
+    return IsPidEqual(*AtLenRel(*((struct Array *) p_sta), -1), (int) pid);
+}
+
 
 int IsStatusNotEmpty(void *p_sta, void *pid) {
     return ((struct ProcessStats *) p_sta)->status != -1;
@@ -54,9 +64,11 @@ struct Shell {
     // struct ProcessStats
     struct Array current_child_process_stats;
 
-    // struct ProcessStats
+    // Array of struct ProcessStats
     struct Array background_last_pipe_process_stats;
-    int background_last_pipe_process_stats_modifiable;
+
+    // char*
+    struct Array logger;
 
     int running;
 };
@@ -66,6 +78,28 @@ void freeShell(struct Shell *shell) {
         free(shell->current_command);
         shell->current_command = NULL;
     }
+
+    // free all unfinished child
+    sigset_t child_mask;
+    while ((sigemptyset(&child_mask) == -1) || (sigaddset(&child_mask, SIGCLD) == -1));
+    if (sigprocmask(SIG_BLOCK, &child_mask, NULL) != -1) {
+
+        for (int i = 0; i < Len(shell->background_last_pipe_process_stats); ++i) {
+
+            struct Array **child_chain = At(shell->background_last_pipe_process_stats, i);
+
+            ApplyToArrayElements(*child_chain, TermProcess);
+            FreeCustomArrayElements(*child_chain, FreeProcessStats);
+            Remove(&shell->background_last_pipe_process_stats, *child_chain);
+            FreeArray(*child_chain);
+        }
+
+        FreeArray(&shell->background_last_pipe_process_stats);
+
+        while (sigprocmask(SIG_UNBLOCK, &child_mask, NULL) == -1);
+    }
+
+
     shell->running = 0;
 }
 
@@ -179,7 +213,7 @@ void runProgram(int in, int out, char **argv) {
         pipe(nullFd);
         dup2(nullFd[0], 0);
         close(nullFd[0]);
-        close(nullFd[1]);
+        // close(nullFd[1]);
     } else if (in != -1) {
         dup2(in, 0);
         close(in);
@@ -241,6 +275,8 @@ void LogSignalled(int status) {
     }
 }
 
+extern char **environ;
+
 void FrontGroundJobTerminate(struct Shell *shell) {
 
     struct ProcessStats last_process = *(struct ProcessStats *) *At(shell->current_child_process_stats,
@@ -273,6 +309,27 @@ void FrontGroundJobTerminate(struct Shell *shell) {
 void StartChildProcess(struct Array chain) {
     for (int i = 0; i < Len(chain); ++i)
         kill(((struct ProcessStats *) *At(chain, i))->pid, SIGUSR1);
+}
+
+int ArgvSize(char **argv) {
+
+    int size = 0;
+    for (; argv[size]; ++size);
+    return size;
+}
+
+char **AppendEnv(char **ori_argv, char **env) {
+
+    int argv_size = ArgvSize(ori_argv);
+    int env_size = ArgvSize(env);
+    char **argv_env = malloc(sizeof(char *) * (argv_size + env_size + 2));
+
+    for (int i = 0; i <= argv_size; ++i)
+        argv_env[i] = ori_argv[i];
+    for (int i = 0; i <= env_size; ++i)
+        argv_env[argv_size + i] = env[i];
+
+    return argv_env;
 }
 
 void runExec(struct Shell *shell, const struct Array words) {
@@ -315,6 +372,14 @@ void runExec(struct Shell *shell, const struct Array words) {
             FreeCustomArrayElements(&current_process_chain, FreeProcessStats);
             FreeArray(&current_process_chain);
 
+            if (shell->command_background_required) {
+
+                // no need to restore as not required
+                setpgid(0, 0);
+            }
+
+            // putenv("TERM=vt100");
+
             runProgram(previous_pipe_in, pipefd[1], (char **) words.data + commandPipeIndex);
         }
 
@@ -351,16 +416,23 @@ void runExec(struct Shell *shell, const struct Array words) {
         } while (Len(shell->current_child_process_stats));
     } else {
 
-        shell->background_last_pipe_process_stats_modifiable = 0;
-        PushBack(&shell->background_last_pipe_process_stats, *AtLenRel(current_process_chain, -1));
-        shell->background_last_pipe_process_stats_modifiable = 1;
+        sigset_t child_mask;
+        while ((sigemptyset(&child_mask) == -1) || (sigaddset(&child_mask, SIGCLD) == -1));
+        if (sigprocmask(SIG_BLOCK, &child_mask, NULL) != -1) {
+
+            struct Array *childChainSave = malloc(sizeof(struct Array));
+            ShallowCopy(childChainSave, current_process_chain);
+
+            PushBack(&shell->background_last_pipe_process_stats, childChainSave);
+            while (sigprocmask(SIG_UNBLOCK, &child_mask, NULL) == -1);
+        }
 
         StartChildProcess(current_process_chain);
 
         // save only the last process, free other
-        --current_process_chain.len;
-        FreeCustomArrayElements(&current_process_chain, FreeProcessStats);
-        FreeArray(&current_process_chain);
+//        --current_process_chain.len;
+//        FreeCustomArrayElements(&current_process_chain, FreeProcessStats);
+//        FreeArray(&current_process_chain);
     }
 
     // restore stdin/out
