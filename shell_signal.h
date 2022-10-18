@@ -81,11 +81,13 @@ void shell_child_signal_handler(int signum) {
                     // }
 
                     // clear bg record
+                    struct Array * finished_child_chain_temp = *finished_child_chain;
 
                     ApplyToArrayElements(*finished_child_chain, TermProcess);
                     FreeCustomArrayElements(*finished_child_chain, FreeProcessStats);
                     Remove(&g_shell.background_last_pipe_process_stats, *finished_child_chain);
-                    FreeArray(*finished_child_chain);
+                    FreeArray(finished_child_chain_temp);
+                    free(finished_child_chain_temp);
                 }
             }
         }

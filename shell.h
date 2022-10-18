@@ -87,11 +87,13 @@ void freeShell(struct Shell *shell) {
         for (int i = 0; i < Len(shell->background_last_pipe_process_stats); ++i) {
 
             struct Array **child_chain = At(shell->background_last_pipe_process_stats, i);
-
+            struct Array *child_chain_temp = *child_chain;
             ApplyToArrayElements(*child_chain, TermProcess);
             FreeCustomArrayElements(*child_chain, FreeProcessStats);
             Remove(&shell->background_last_pipe_process_stats, *child_chain);
-            FreeArray(*child_chain);
+            FreeArray(child_chain_temp);
+            free(child_chain_temp);
+
         }
 
         FreeArray(&shell->background_last_pipe_process_stats);
