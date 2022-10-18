@@ -21,12 +21,18 @@ struct Array NewArray() {
     return result;
 }
 
-void FreeCustomArrayElements(struct Array *array, void(*deallocator)(void *)) {
-    for (int i = 0; i < array->len; ++i) {
-        deallocator(array->data[i]);
-        array->data[i] = NULL;
-    }
+void ApplyToArrayElements(struct Array *array, void(*operator)(void *)) {
+    for (int i = 0; i < array->len; ++i)
+        operator(array->data[i]);
+}
 
+void FreeCustomArrayElements(struct Array *array, void(*deallocator)(void *)) {
+//    for (int i = 0; i < array->len; ++i) {
+//        deallocator(array->data[i]);
+//        array->data[i] = NULL;
+//    }
+
+    ApplyToArrayElements(array, deallocator);
     array->len = 0;
 }
 
@@ -37,6 +43,12 @@ void FreeArrayElements(struct Array *array) {
     }
 
     array->len = 0;
+}
+
+void ShallowCopy(struct Array *to, struct Array from) {
+    to->data = from.data;
+    to->len = from.len;
+    to->size = from.size;
 }
 
 int CountNull(struct Array array) {
